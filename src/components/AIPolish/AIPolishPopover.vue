@@ -28,8 +28,9 @@ const loading = ref(false)
 const abortController = ref<AbortController | null>(null)
 const customPrompts = ref<string[]>([])
 const hasResult = ref(false)
+const formatValidationPassed = ref(true)
 const selectedAction = ref<
-  `optimize` | `summarize` | `spellcheck` | `translate-zh` | `translate-en` | `custom`
+  `markdown-format` | `optimize` | `summarize` | `spellcheck` | `translate-zh` | `translate-en` | `custom`
 >(`optimize`)
 const currentText = ref(``)
 const error = ref(``)
@@ -51,6 +52,12 @@ interface ActionOption {
 }
 
 const actionOptions: ActionOption[] = [
+  {
+    value: `markdown-format`,
+    label: `格式优化（仅加 Markdown 语法）`,
+    defaultPrompt:
+      `请仅为下列纯文本添加必要的 Markdown 语法标记，使其结构化渲染（如标题层级、列表、引用、代码块、分隔线、链接、表格）。严格禁止修改原文任意字符（不可增删改、不可纠错、不可翻译），仅可插入 Markdown 标记与必要的换行/空行。`,
+  },
   {
     value: `optimize`,
     label: `优化文本`,
@@ -136,9 +143,14 @@ async function runAIAction() {
   resetState()
   loading.value = true
   abortController.value = new AbortController()
+  formatValidationPassed.value = true
 
-  const systemPrompt
+  let systemPrompt
     = `你是一名专业的多语言文本助手，请根据用户的指令处理下列内容。在输出时，不要输出任何额外的信息，只输出处理后的文本。`
+  if (selectedAction.value === `markdown-format`) {
+    systemPrompt
+      = `你是一名严格的 Markdown 标注助手。务必遵守：1）只能插入 Markdown 语法标记（如 #、##、###、-、*、1.、>、\`、\`\`\` 等）与必要的换行/空行；2）严禁改动原文任一字符（包括文字、数字、标点和其顺序），也不得删除或重排；3）不得润色、纠错、精简或翻译；4）应智能识别题目/小标题与大纲层级、列表（有序/无序）、引用、代码块、分隔线、表格、以及将裸露 URL 转为符合 Markdown 的链接（仅添加语法，不改动 URL 文本）；5）输出只包含添加标记后的 Markdown 文本。`
+  }
   const picked = actionOptions.find(o => o.value === selectedAction.value)!
   const parts: string[] = []
 
@@ -213,6 +225,16 @@ async function runAIAction() {
         catch {}
       }
     }
+
+    // After stream finished: validate for markdown-format
+    if (selectedAction.value === `markdown-format`) {
+      const original = currentText.value
+      const formatted = message.value
+      formatValidationPassed.value = validateMarkdownOnlyInsertion(original, formatted)
+      if (!formatValidationPassed.value) {
+        error.value = `检测到输出可能改动了原文字符或顺序，已拦截。请重试或调整提示词。`
+      }
+    }
   }
   catch (e: any) {
     if (e.name === `AbortError`) {
@@ -238,6 +260,10 @@ function stopAI() {
 
 /* -------------------- actions -------------------- */
 function replaceText() {
+  if (selectedAction.value === `markdown-format` && !formatValidationPassed.value) {
+    toast.error(`结果未通过校验，已阻止替换。`)
+    return
+  }
   const cm = toRaw(store.editor!)!
   const start = cm.getCursor(`start`)
   cm.replaceSelection(message.value)
@@ -268,6 +294,46 @@ function close() {
 }
 
 defineExpose({ visible, runAIAction, replaceText, show, close, stopAI })
+
+// -------------------- helpers: validation --------------------
+function validateMarkdownOnlyInsertion(original: string, formatted: string): boolean {
+  const normalize = (s: string) => s.replace(/\s+/g, ` `).trim()
+  const stripMd = (md: string) => {
+    let out = md
+    // Remove code fences (drop the fence lines but keep inner content)
+    // Use a simple line-anchored pattern to avoid assertion contradictions
+    out = out.replace(/^\s*```[^\n]*$/gm, ``)
+    // Remove ATX headings markers at line start
+    out = out.replace(/^(\s{0,3}#{1,6})\s+/gm, ``)
+    // Remove blockquote markers
+    out = out.replace(/^(\s{0,3}>+)\s?/gm, ``)
+    // Remove list markers (unordered and ordered)
+    out = out.replace(/^(\s{0,3})([-*+])\s+/gm, `$1`)
+    out = out.replace(/^(\s{0,3})\d+\.[)\s]+/gm, `$1`)
+    // Remove horizontal rules lines
+    out = out.replace(/^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/gm, ``)
+    // Remove table header separators (e.g., | --- | :---: |)
+    // Avoid overlapping \s* with classes containing spaces to prevent super-linear backtracking
+    out = out.replace(/^[ \t]*(?:\|[ \t]*)?(?:[:\-|][ \t]*)+$/gm, ``)
+    // Strip table pipes but keep cell contents
+    out = out.replace(/^[ \t]*\|(?:[^|\n]*\|)+[ \t]*$/gm, row => row.replace(/[ \t]*\|[ \t]*/g, ` `).trim())
+    // Inline code backticks
+    out = out.replace(/`([^`]*)`/g, `$1`)
+    // Emphasis markers
+    out = out.replace(/\*{1,3}([^*]+)\*{1,3}/g, `$1`).replace(/_{1,3}([^_]+)_{1,3}/g, `$1`)
+    // Links: [text](url) -> text ; images ![alt](src) -> alt src? Keep alt text only
+    out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, `$1`)
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, `$1`)
+    // Autolink <url> -> url
+    out = out.replace(/<([^>]+)>/g, `$1`)
+    // HTML tags (should not be added, but just in case)
+    out = out.replace(/<[^>]+>/g, ``)
+    return out
+  }
+  const a = normalize(original)
+  const b = normalize(stripMd(formatted))
+  return a === b
+}
 </script>
 
 <template>
