@@ -57,3 +57,10 @@ components.d.ts
 .output
 web-ext.config.ts
 .wrangler
+/output
+/chrome-mv3
+Effi_Logo.png
+icon-40.png
+logo_IP.svg
+md-2.0.4-chrome.zip
+wind.css
